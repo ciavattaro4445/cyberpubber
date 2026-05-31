@@ -3,7 +3,7 @@
 A single-file, browser-based converter that turns text PDFs into clean, reflowable EPUBs.
 Everything runs locally in your browser — **your file is never uploaded anywhere**.
 
-Live at **https://ciavattaro4445.github.io/pdf2epub/** once GitHub Pages is enabled (see *Hosting* below).
+Live at **https://ciavattaro4445.github.io/cyberpubber/**.
 
 Open `index.html` in any browser, drop in a PDF, and download an EPUB.
 
