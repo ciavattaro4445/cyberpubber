@@ -249,12 +249,49 @@ function analyze(pages,opts,onProg,toc){
   for(const [s,c] of styleWeight) if(c>bsc){bsc=c;bodyStyle=s;}
 
   const blocks=[];
-  let buf="", bufRuns=[], lastBodyLine=null;
+  let lastBodyLine=null;
+  /* Three independent accumulators: body paragraphs, footnotes, bibliography
+     entries. Footnotes and references interleave with the body in reading order
+     but must not be folded into body paragraphs. */
+  const para={buf:"",runs:[]}, fn={buf:"",runs:[]}, bib={buf:"",runs:[]};
 
-  const flush=()=>{
-    if(buf.trim()) blocks.push({kind:"para", text:buf.trim(), runs:collapseRuns(bufRuns)});
-    buf=""; bufRuns=[];
+  /* Append a line's text + style runs to a buffer, mending hyphenation and
+     keeping the runs in lockstep so inline emphasis survives the line-join. */
+  const appendTo=(st,l)=>{
+    const lineRuns=l.runs.map(r=>({text:r.text,style:r.style}));
+    if(st.buf){
+      if(opts.dehyphen && /[A-Za-zÀ-ÿ]-$/.test(st.buf) && /^[a-zà-ÿ]/.test(l.text)){
+        st.buf=st.buf.replace(/-$/,"")+l.text;
+        if(st.runs.length) st.runs[st.runs.length-1].text=st.runs[st.runs.length-1].text.replace(/-$/,"");
+      } else {
+        st.buf+=" "+l.text;
+        if(st.runs.length) st.runs[st.runs.length-1].text+=" ";
+      }
+      for(const r of lineRuns) st.runs.push(r);
+    } else { st.buf=l.text; st.runs=lineRuns; }
   };
+  const flushAs=(st,kind)=>{
+    if(st.buf.trim()) blocks.push({kind, text:st.buf.trim(), runs:collapseRuns(st.runs)});
+    st.buf=""; st.runs=[];
+  };
+  const flush=()=>flushAs(para,"para");   // body paragraph
+
+  /* Per-page content y-range, for spotting footnotes parked at the page foot. */
+  const pageRange=new Map();
+  for(const l of allLines){ const r=pageRange.get(l.page)||{min:Infinity,max:-Infinity};
+    if(l.y<r.min)r.min=l.y; if(l.y>r.max)r.max=l.y; pageRange.set(l.page,r); }
+  /* A footnote is set in smaller type than the body AND sits in the bottom band
+     of the page. The size test alone would also catch mid-page figure notes; the
+     position test alone would catch the last body line — together they're stable. */
+  const isFootnote=(l)=>{
+    if(!opts.headings) return false;
+    const r=pageRange.get(l.page); if(!r) return false;
+    const range=r.max-r.min; if(range<=0) return false;
+    return l.h < bodyH*0.9 && l.y < r.min + range*0.28;
+  };
+  const FN_MARK=/^(\d{1,3}|[*†‡§¶])(?=\D)/;   // a footnote opens with a number or symbol
+  const REF_HEAD=/^(references|bibliography|works cited|notes)$/i;
+  let biblio=false, biblioLevel=0, refLeft=null;
 
   const headingLevel=(l)=>{
     if(!opts.headings) return 0;
@@ -288,11 +325,23 @@ function analyze(pages,opts,onProg,toc){
     if(tocPages.has(l.page)) continue;        // don't pour the contents page into the body
     if(isStripped(l)) continue;
 
+    /* Footnotes: small type at the page foot. Pull them out of the body flow so
+       they can't corrupt paragraphs, and split them where a new note's marker
+       (a number or symbol) begins. Emitted in document order. */
+    if(isFootnote(l)){
+      flush();
+      if(FN_MARK.test(l.text) && fn.buf.trim()) flushAs(fn,"footnote");
+      appendTo(fn,l);
+      lastBodyLine=null;
+      continue;
+    }
+    if(fn.buf.trim()) flushAs(fn,"footnote");   // left the footnote zone
+
     /* TOC match → authoritative chapter boundary (uses the contents' own casing) */
     if(tocPending.size){
       const key=normTitle(l.text);
       if(tocPending.has(key)){
-        flush();
+        flush(); flushAs(bib,"biblio"); biblio=false;
         blocks.push({kind:"heading",level:1,text:tocPending.get(key),chapter:true});
         tocPending.delete(key); tocMatched++;
         lastBodyLine=null;
@@ -302,15 +351,28 @@ function analyze(pages,opts,onProg,toc){
 
     const hl=headingLevel(l);
     if(hl){
-      flush();
+      flush(); flushAs(bib,"biblio");
       blocks.push({kind:"heading",level:hl,text:l.text});
+      if(REF_HEAD.test(l.text.trim())){ biblio=true; biblioLevel=hl; refLeft=null; }
+      else if(biblio && hl<=biblioLevel){ biblio=false; }
+      lastBodyLine=null;
+      continue;
+    }
+
+    /* Bibliography: hanging-indent entries — a new entry de-dents to the block's
+       left margin, continuations sit indented under it. */
+    if(biblio){
+      if(refLeft===null) refLeft=l.x;
+      if(l.x <= refLeft + bodyH*0.6) flushAs(bib,"biblio");   // back at the margin → new entry
+      appendTo(bib,l);
+      if(l.x<refLeft) refLeft=l.x;
       lastBodyLine=null;
       continue;
     }
 
     /* decide whether this body line starts a NEW paragraph */
     let newPara=false;
-    if(!buf){
+    if(!para.buf){
       newPara=true;
     } else if(lastBodyLine){
       /* A paragraph's first line is indented — but the indent is a step to the
@@ -324,31 +386,15 @@ function analyze(pages,opts,onProg,toc){
       const sameApage = l.page===lastBodyLine.page;
       const vGap = sameApage ? (lastBodyLine.y - l.y) : 0;
       const bigGap = sameApage && vGap > bodyGap*1.5;
-      const prevShortEnd = lastBodyLine.right < bodyRight - bodyH*3 && /[.!?»"”’)]$/.test(buf.trim());
+      const prevShortEnd = lastBodyLine.right < bodyRight - bodyH*3 && /[.!?»"”’)]$/.test(para.buf.trim());
       if(indented || bigGap || prevShortEnd) newPara=true;
     }
 
     if(newPara) flush();
-
-    /* join, mending hyphenation if requested — keep the style runs in lockstep
-       with the text so inline emphasis survives the line-join. */
-    const lineRuns=l.runs.map(r=>({text:r.text,style:r.style}));
-    if(buf){
-      if(opts.dehyphen && /[A-Za-zÀ-ÿ]-$/.test(buf) && /^[a-zà-ÿ]/.test(l.text)){
-        buf=buf.replace(/-$/,"")+l.text;
-        if(bufRuns.length) bufRuns[bufRuns.length-1].text=bufRuns[bufRuns.length-1].text.replace(/-$/,"");
-      } else {
-        buf+=" "+l.text;
-        if(bufRuns.length) bufRuns[bufRuns.length-1].text+=" ";
-      }
-      for(const r of lineRuns) bufRuns.push(r);
-    } else {
-      buf=l.text;
-      bufRuns=lineRuns;
-    }
+    appendTo(para,l);
     lastBodyLine=l;
   }
-  flush();
+  flush(); flushAs(fn,"footnote"); flushAs(bib,"biblio");
   return {blocks, tocMatched, tocTotal: toc ? tocPending.size + tocMatched : 0};
 }
 
@@ -406,12 +452,14 @@ function renderRuns(b){
 
 function chapterXhtml(ch){
   const body=ch.blocks.map(b=>{
-    if(b.kind==="heading") return `<h${b.level}>${esc(b.text)}</h${b.level}>`;
+    if(b.kind==="heading")  return `<h${b.level}>${esc(b.text)}</h${b.level}>`;
+    if(b.kind==="footnote") return `<p class="footnote">${renderRuns(b)}</p>`;
+    if(b.kind==="biblio")   return `<p class="biblio">${renderRuns(b)}</p>`;
     return `<p>${renderRuns(b)}</p>`;
   }).join("\n");
   return `<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="en" lang="en">
 <head><meta charset="utf-8"/><title>${esc(ch.title)}</title>
 <link rel="stylesheet" type="text/css" href="../styles/style.css"/></head>
 <body>
@@ -427,6 +475,11 @@ h2{font-size:1.35em;}
 h3{font-size:1.12em;font-style:italic;font-weight:400;}
 p{margin:0;text-indent:1.25em;}
 p:first-of-type,h1+p,h2+p,h3+p{text-indent:0;}
+/* footnotes: smaller, set off from the body, never first-line indented */
+p.footnote{font-size:.82em;line-height:1.4;text-indent:0;margin:.15em 0;color:#333;}
+p.footnote:first-of-type,p:not(.footnote)+p.footnote{margin-top:.8em;border-top:1px solid #bbb;padding-top:.5em;}
+/* bibliography: hanging indent, no justification (long URLs/titles break badly) */
+p.biblio{text-indent:-1.4em;margin:0 0 .4em 1.4em;text-align:left;}
 `;
 
 function buildOpf(meta,chapters,uid,modified){

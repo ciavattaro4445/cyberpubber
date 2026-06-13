@@ -20,7 +20,7 @@ const pdfjsLib = require("pdfjs-dist/legacy/build/pdf.js");
 
 // folio.js is UMD; from an ES module it imports as a default object.
 import Folio from "../folio.js";
-const { fontStyle, buildLines, detectToc, analyze, toChapters } = Folio;
+const { fontStyle, buildLines, detectToc, analyze, toChapters, chapterXhtml } = Folio;
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -85,9 +85,12 @@ if(arg){
   console.log(`pages=${numPages} blocks=${blocks.length} paras=${paras(blocks).length} ` +
               `headings=${blocks.filter(b=>b.kind==="heading").length} ` +
               `chapters=${chapters.length} toc=${tocMatched}/${tocTotal}`);
+  const tagOf = b => b.kind === "heading" ? `H${b.level}`
+                   : b.kind === "footnote" ? "fn"
+                   : b.kind === "biblio"   ? "rf"
+                   : "p ";
   blocks.forEach((b,i)=>{
-    const tag = b.kind === "heading" ? `H${b.level}` : "p ";
-    console.log(`[${String(i).padStart(3)}] ${tag} ${b.text.slice(0,110)}`);
+    console.log(`[${String(i).padStart(3)}] ${tagOf(b)} ${b.text.slice(0,110)}`);
   });
   process.exit(0);
 }
@@ -139,6 +142,32 @@ console.log("\nfixture: structured.pdf (title, bold/numbered headings, inline em
   check("emphasis paragraph stays whole",
     !!intro && intro.text.includes("broadly important"),
     intro ? `ends: "${intro.text.slice(-22)}"` : "not found");
+}
+
+console.log("\nfixture: notes.pdf (footnote at page foot + hanging-indent references)");
+{
+  const { pages } = await extractPages(path.join(HERE, "fixtures", "notes.pdf"));
+  const { blocks } = convert(pages, { strip:false });
+  const footnotes = blocks.filter(b => b.kind === "footnote");
+  const biblio    = blocks.filter(b => b.kind === "biblio");
+
+  // footnote pulled out of the body as its own kind, grouped across its two lines
+  check("footnote detected as footnote (not paragraph)", footnotes.length === 1,
+    `got ${footnotes.length}`);
+  check("footnote grouped whole",
+    footnotes[0] && footnotes[0].text.includes("test grouping"));
+  check("footnote did not leak into a paragraph",
+    !blocks.some(b => b.kind === "para" && b.text.includes("clarifying footnote")));
+
+  // references split into individual hanging-indent entries
+  check("two bibliography entries", biblio.length === 2, `got ${biblio.length}`);
+  check("hanging-indent continuation joined into its entry",
+    biblio.some(b => /^Smith, Jane/.test(b.text) && b.text.includes("Journal of Examples")));
+
+  // serialization carries the structural classes
+  const xh = toChapters(blocks).map(chapterXhtml).join("\n");
+  check("footnote renders with class", /<p class="footnote">/.test(xh));
+  check("bibliography renders with hanging-indent class", /<p class="biblio">/.test(xh));
 }
 
 console.log(failures ? `\nFAILED (${failures})` : "\nPASSED");
