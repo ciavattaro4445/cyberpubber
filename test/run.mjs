@@ -20,7 +20,7 @@ const pdfjsLib = require("pdfjs-dist/legacy/build/pdf.js");
 
 // folio.js is UMD; from an ES module it imports as a default object.
 import Folio from "../folio.js";
-const { buildLines, detectToc, analyze, toChapters } = Folio;
+const { fontStyle, buildLines, detectToc, analyze, toChapters } = Folio;
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -32,13 +32,32 @@ async function extractPages(pdfPath){
   // are irrelevant when we only pull text content (no rendering).
   const pdf = await pdfjsLib.getDocument({ data, verbosity:0 }).promise;
   const pages = [];
+  const fontStyleById = new Map();   // PDF.js font id -> 'regular'|'bold'|'italic'|'bolditalic'
   for(let p=1; p<=pdf.numPages; p++){
     const page = await pdf.getPage(p);
     const tc = await page.getTextContent();
+    await resolveFonts(page, tc.items, fontStyleById);
+    for(const it of tc.items) it.style = fontStyleById.get(it.fontName) || "regular";
     pages.push(buildLines(tc.items));
     page.cleanup();
   }
   return { pages, numPages: pdf.numPages };
+}
+
+/* Resolve the PostScript name behind each font id to a style. PDF.js only fills
+   commonObjs once a page's operator list is built, so we force it — but only on
+   pages that introduce a font id we haven't seen, keeping the cost bounded (the
+   first 1–3 pages in practice). Mirrors readPdf() in index.html. */
+async function resolveFonts(page, items, cache){
+  const unseen = new Set();
+  for(const it of items) if(it.fontName && !cache.has(it.fontName)) unseen.add(it.fontName);
+  if(!unseen.size) return;
+  try{ await page.getOperatorList(); }catch{ /* degrade to size-only */ }
+  for(const id of unseen){
+    let name=null;
+    try{ const f=page.commonObjs.get(id); name=f && f.name; }catch{ /* not loaded */ }
+    cache.set(id, fontStyle(name));
+  }
 }
 
 function convert(pages, opts){
@@ -98,6 +117,28 @@ console.log("fixture: sample.pdf (heading + 3 justified paragraphs)");
   check("no per-line shattering (≤ 5 paragraphs)",
     paras(blocks).length <= 5,
     `got ${paras(blocks).length} paragraphs`);
+}
+
+console.log("\nfixture: structured.pdf (title, bold/numbered headings, inline emphasis)");
+{
+  const { pages } = await extractPages(path.join(HERE, "fixtures", "structured.pdf"));
+  const { blocks } = convert(pages, { strip:false });
+  const heading = (lvl, re) => blocks.some(b => b.kind === "heading" && b.level === lvl && re.test(b.text));
+  const runIn = (needle, style) => {
+    const b = blockWith(blocks, needle);
+    return !!b && b.runs && b.runs.some(r => r.style === style && r.text.includes(needle));
+  };
+
+  check("title → h1", heading(1, /A Study of Small Things/));
+  check("bold section → h2", heading(2, /^1\. Introduction/));
+  check("numbered subsection → h3", heading(3, /^1\.1 Background/));         // regular font, numbering only
+  check("italic word → italic run", runIn("emergent", "italic"));
+  check("bold word → bold run", runIn("surprising", "bold"));
+
+  const intro = blockWith(blocks, "This paper studies");
+  check("emphasis paragraph stays whole",
+    !!intro && intro.text.includes("broadly important"),
+    intro ? `ends: "${intro.text.slice(-22)}"` : "not found");
 }
 
 console.log(failures ? `\nFAILED (${failures})` : "\nPASSED");

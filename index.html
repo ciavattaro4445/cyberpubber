@@ -339,7 +339,7 @@
    exercised headlessly by the Node test harness (test/run.mjs). This file keeps
    only the browser glue: PDF.js extraction, JSZip packaging, the share-sheet
    output, and the UI. */
-const { buildLines, detectToc, analyze, toChapters,
+const { fontStyle, buildLines, detectToc, analyze, toChapters,
         chapterXhtml, STYLE_CSS, buildOpf, buildNav, buildNcx } = Folio;
 
 /* ----- PDF.js worker (same CDN/version as the library above) ----- */
@@ -424,9 +424,12 @@ async function readPdf(file,onProg){
   const N=pdf.numPages;
   const pages=[];
   let totalChars=0;
+  const fontStyleById=new Map();   // PDF.js font id -> regular|bold|italic|bolditalic
   for(let p=1;p<=N;p++){
     const page=await pdf.getPage(p);
     const tc=await page.getTextContent();
+    await resolveFonts(page,tc.items,fontStyleById);
+    for(const it of tc.items) it.style=fontStyleById.get(it.fontName)||"regular";
     const lines=buildLines(tc.items);
     lines.forEach(l=>totalChars+=l.text.length);
     pages.push(lines);
@@ -435,6 +438,23 @@ async function readPdf(file,onProg){
     if(p%5===0) await sleep(0); // let UI breathe
   }
   return {pages,N,totalChars};
+}
+
+/* Resolve each glyph's font style (bold/italic) so headings and inline emphasis
+   survive into the EPUB. PDF.js only fills commonObjs once a page's operator
+   list is built, so we force it — but only on pages that introduce a font id we
+   haven't seen yet, which keeps the extra work to the first page or three even
+   in a long book. Any failure degrades silently to size-only (all "regular"). */
+async function resolveFonts(page,items,cache){
+  const unseen=new Set();
+  for(const it of items) if(it.fontName && !cache.has(it.fontName)) unseen.add(it.fontName);
+  if(!unseen.size) return;
+  try{ await page.getOperatorList(); }catch(e){ /* degrade to size-only */ }
+  for(const id of unseen){
+    let name=null;
+    try{ const f=page.commonObjs.get(id); name=f && f.name; }catch(e){ /* not loaded */ }
+    cache.set(id, fontStyle(name));
+  }
 }
 
 

@@ -44,6 +44,43 @@ function mode(nums){
 }
 function median(nums){ if(!nums.length)return 0; const s=[...nums].sort((a,b)=>a-b); return s[Math.floor(s.length/2)]; }
 
+/* ---------- font style ----------
+   The caller resolves each glyph's PostScript font name (e.g. "Utopia-Bold")
+   and we reduce it to one of four styles. Keeping this here means the browser
+   and the test harness classify identically; folio.js stays PDF.js-free. */
+function fontStyle(name){
+  if(!name) return "regular";
+  const n=String(name).toLowerCase();
+  const bold=/(bold|black|heavy|semibold|demibold|extrabold|ultra)/.test(n);
+  const ital=/(italic|oblique|cursive|kursiv)/.test(n);
+  return bold&&ital ? "bolditalic" : bold ? "bold" : ital ? "italic" : "regular";
+}
+
+/* Merge adjacent runs that share a style, trim the outer whitespace, drop
+   empties. Runs are { text, style } where style ∈ regular|bold|italic|bolditalic. */
+function collapseRuns(runs){
+  const out=[];
+  for(const r of runs){
+    if(!r.text) continue;
+    const last=out[out.length-1];
+    if(last && last.style===r.style) last.text+=r.text;
+    else out.push({text:r.text, style:r.style});
+  }
+  if(out.length){
+    out[0].text=out[0].text.replace(/^\s+/,"");
+    out[out.length-1].text=out[out.length-1].text.replace(/\s+$/,"");
+  }
+  return out.filter(r=>r.text);
+}
+/* The style covering the most characters in a line — its "dominant" style. */
+function dominantStyle(runs){
+  const tally=new Map();
+  for(const r of runs){ tally.set(r.style,(tally.get(r.style)||0)+r.text.length); }
+  let best="regular",bc=-1;
+  for(const [s,c] of tally) if(c>bc){bc=c;best=s;}
+  return best;
+}
+
 /* ============================================================================
    STEP 1 — group raw glyph items into visual lines, with sensible word spacing.
    `items` are PDF.js text items: { str, transform:[a,b,c,d,x,y], width, height }.
@@ -54,7 +91,8 @@ function buildLines(items){
     x:it.transform[4],
     y:it.transform[5],
     w:it.width||0,
-    h:it.height||Math.hypot(it.transform[1],it.transform[3])||10
+    h:it.height||Math.hypot(it.transform[1],it.transform[3])||10,
+    style:it.style||"regular"
   }));
   if(!its.length) return [];
   its.sort((a,b)=> (b.y-a.y) || (a.x-b.x));
@@ -67,15 +105,20 @@ function buildLines(items){
   }
   for(const ln of lines){
     ln.items.sort((a,b)=>a.x-b.x);
-    let text="",prev=null;
+    let text="",prev=null; const runs=[];
+    const addRun=(t,style)=>{ const last=runs[runs.length-1];
+      if(last && last.style===style) last.text+=t; else runs.push({text:t,style}); };
     for(const it of ln.items){
+      const style=it.style||"regular";
       if(prev){
         const gap=it.x-(prev.x+prev.w);
-        if(gap>it.h*0.28 && !/\s$/.test(text) && !/^\s/.test(it.str)) text+=" ";
+        if(gap>it.h*0.28 && !/\s$/.test(text) && !/^\s/.test(it.str)){ text+=" "; addRun(" ",style); }
       }
-      text+=it.str; prev=it;
+      text+=it.str; addRun(it.str,style); prev=it;
     }
     ln.text=text.replace(/\s+/g," ").trim();
+    ln.runs=collapseRuns(runs.map(r=>({text:r.text.replace(/\s+/g," "),style:r.style})));
+    ln.font=dominantStyle(ln.runs);
     ln.x=ln.items[0].x;
     ln.right=ln.items[ln.items.length-1].x+ln.items[ln.items.length-1].w;
   }
@@ -197,10 +240,21 @@ function analyze(pages,opts,onProg,toc){
     return false;
   };
 
-  const blocks=[];
-  let buf="", lastBodyLine=null;
+  /* The body's dominant style — usually "regular". A heading that is the same
+     size as the body but set bolder is detectable because its line style
+     differs from this. */
+  const styleWeight=new Map();
+  for(const l of allLines) styleWeight.set(l.font,(styleWeight.get(l.font)||0)+l.text.length);
+  let bodyStyle="regular",bsc=-1;
+  for(const [s,c] of styleWeight) if(c>bsc){bsc=c;bodyStyle=s;}
 
-  const flush=()=>{ if(buf.trim()){ blocks.push({kind:"para",text:buf.trim()}); } buf=""; };
+  const blocks=[];
+  let buf="", bufRuns=[], lastBodyLine=null;
+
+  const flush=()=>{
+    if(buf.trim()) blocks.push({kind:"para", text:buf.trim(), runs:collapseRuns(bufRuns)});
+    buf=""; bufRuns=[];
+  };
 
   const headingLevel=(l)=>{
     if(!opts.headings) return 0;
@@ -208,10 +262,22 @@ function analyze(pages,opts,onProg,toc){
     const ratio=l.h/bodyH;
     const shortish=l.text.length>=2 && l.text.length<=80;
     const notSentence=!/[.,;:]$/.test(l.text);
+    const bold=(l.font==="bold"||l.font==="bolditalic") && bodyStyle!=="bold" && bodyStyle!=="bolditalic";
+    /* Section numbering ("1. Introduction", "2.1 AI Accelerates…", "3.2.1 …").
+       Many papers set subsection titles in the plain body font at body size, so
+       neither size nor weight reveals them — the number prefix does. Depth → level
+       (0 dots = top section → h2, deeper → h3). Capped digits avoid matching
+       years like "2024"; the required capitalised word avoids "100 million…". */
+    const num=l.text.match(/^(\d{1,3}(?:\.\d{1,3}){0,3})\.?\s+\p{Lu}/u);
     if(isChap) return 1;
     if(ratio>=1.55 && shortish && notSentence) return 1;
     if(ratio>=1.28 && shortish && notSentence) return 2;
+    if(num && shortish && notSentence) return Math.min(3, 2 + (num[1].match(/\./g)||[]).length);
     if(ratio>=1.14 && shortish && notSentence && l.text.length<=60) return 3;
+    /* Same-size section headings that are only set bolder than the body — the
+       case the size-ratio rules miss. Require the whole line to be bold and not
+       end like a sentence, so a paragraph with a bold lead-in word isn't a heading. */
+    if(bold && shortish && notSentence && l.text.length<=70 && ratio>=0.9) return 2;
     return 0;
   };
 
@@ -264,15 +330,21 @@ function analyze(pages,opts,onProg,toc){
 
     if(newPara) flush();
 
-    /* join, mending hyphenation if requested */
+    /* join, mending hyphenation if requested — keep the style runs in lockstep
+       with the text so inline emphasis survives the line-join. */
+    const lineRuns=l.runs.map(r=>({text:r.text,style:r.style}));
     if(buf){
       if(opts.dehyphen && /[A-Za-zÀ-ÿ]-$/.test(buf) && /^[a-zà-ÿ]/.test(l.text)){
         buf=buf.replace(/-$/,"")+l.text;
+        if(bufRuns.length) bufRuns[bufRuns.length-1].text=bufRuns[bufRuns.length-1].text.replace(/-$/,"");
       } else {
         buf+=" "+l.text;
+        if(bufRuns.length) bufRuns[bufRuns.length-1].text+=" ";
       }
+      for(const r of lineRuns) bufRuns.push(r);
     } else {
       buf=l.text;
+      bufRuns=lineRuns;
     }
     lastBodyLine=l;
   }
@@ -319,10 +391,23 @@ function toChapters(blocks){
    ============================================================================ */
 const esc=s=>String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
 
+/* Render a block's inline runs, wrapping emphasis. Falls back to plain escaped
+   text when no runs are present (e.g. font styles couldn't be resolved). */
+function renderRuns(b){
+  if(!b.runs || !b.runs.length) return esc(b.text);
+  return b.runs.map(r=>{
+    const t=esc(r.text);
+    if(r.style==="bold") return `<strong>${t}</strong>`;
+    if(r.style==="italic") return `<em>${t}</em>`;
+    if(r.style==="bolditalic") return `<strong><em>${t}</em></strong>`;
+    return t;
+  }).join("");
+}
+
 function chapterXhtml(ch){
   const body=ch.blocks.map(b=>{
     if(b.kind==="heading") return `<h${b.level}>${esc(b.text)}</h${b.level}>`;
-    return `<p>${esc(b.text)}</p>`;
+    return `<p>${renderRuns(b)}</p>`;
   }).join("\n");
   return `<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html>
@@ -403,6 +488,6 @@ function buildNcx(chapters,uid,title){
 </ncx>`;
 }
 
-return { buildLines, detectToc, analyze, toChapters,
+return { fontStyle, buildLines, detectToc, analyze, toChapters,
          esc, chapterXhtml, STYLE_CSS, buildOpf, buildNav, buildNcx };
 });
