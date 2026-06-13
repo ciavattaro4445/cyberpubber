@@ -405,30 +405,40 @@ function toChapters(blocks){
   if(!blocks.length) return [{title:"Text",blocks:[{kind:"para",text:"(No text could be extracted.)"}]}];
 
   const isHeading=(b,lvl)=> b.kind==="heading" && b.level===lvl;
+  let chapters;
 
   // If a Contents page gave us authoritative boundaries, split on those.
   if(blocks.some(b=>b.chapter)){
-    const chapters=[]; let cur=null;
+    chapters=[]; let cur=null;
     for(const b of blocks){
       if(b.chapter){ cur={title:b.text,blocks:[b]}; chapters.push(cur); }
       else { if(!cur){ cur={title:"Front matter",blocks:[]}; chapters.push(cur); } cur.blocks.push(b); }
     }
-    return chapters;
-  }
-
-  // Fallback: smallest heading level present from the font-size heuristic.
-  let boundary=null;
-  for(const lvl of [1,2,3]) if(blocks.some(b=>isHeading(b,lvl))){ boundary=lvl; break; }
-  if(!boundary) return [{title:"Text",blocks}];
-  const chapters=[]; let cur=null;
-  for(const b of blocks){
-    if(isHeading(b,boundary)){
-      cur={title:b.text,blocks:[b]}; chapters.push(cur);
-    } else {
-      if(!cur){ cur={title:"Opening",blocks:[]}; chapters.push(cur); }
-      cur.blocks.push(b);
+  } else {
+    /* Split at the shallowest heading level that actually recurs (≥2). A paper
+       with a single title h1 shouldn't collapse into one file — its h2 sections
+       become the files instead, and deeper headings nest under them in the nav. */
+    let boundary=null;
+    for(const lvl of [1,2,3]) if(blocks.filter(b=>isHeading(b,lvl)).length>=2){ boundary=lvl; break; }
+    if(boundary===null) for(const lvl of [1,2,3]) if(blocks.some(b=>isHeading(b,lvl))){ boundary=lvl; break; }
+    if(!boundary){ chapters=[{title:"Text",blocks}]; }
+    else {
+      chapters=[]; let cur=null;
+      for(const b of blocks){
+        if(isHeading(b,boundary)){ cur={title:b.text,blocks:[b]}; chapters.push(cur); }
+        else { if(!cur){ cur={title:null,blocks:[]}; chapters.push(cur); } cur.blocks.push(b); }
+      }
+      // Name the leading pre-boundary section after its own title heading, if any.
+      for(const ch of chapters) if(ch.title===null){
+        const h=ch.blocks.find(b=>b.kind==="heading");
+        ch.title = h ? h.text : "Opening";
+      }
     }
   }
+
+  // Stable ids on every heading, so nav anchors and chapter markup agree.
+  let n=0;
+  for(const ch of chapters) for(const b of ch.blocks) if(b.kind==="heading") b.id="h"+(++n);
   return chapters;
 }
 
@@ -452,7 +462,7 @@ function renderRuns(b){
 
 function chapterXhtml(ch){
   const body=ch.blocks.map(b=>{
-    if(b.kind==="heading")  return `<h${b.level}>${esc(b.text)}</h${b.level}>`;
+    if(b.kind==="heading")  return `<h${b.level}${b.id?` id="${b.id}"`:""}>${esc(b.text)}</h${b.level}>`;
     if(b.kind==="footnote") return `<p class="footnote">${renderRuns(b)}</p>`;
     if(b.kind==="biblio")   return `<p class="biblio">${renderRuns(b)}</p>`;
     return `<p>${renderRuns(b)}</p>`;
@@ -469,10 +479,12 @@ ${body}
 
 const STYLE_CSS=`@namespace epub "http://www.idpf.org/2007/ops";
 body{font-family:Georgia,"Times New Roman",serif;line-height:1.6;margin:5% 7%;text-align:justify;hyphens:auto;}
-h1,h2,h3{font-family:Georgia,serif;text-align:center;line-height:1.2;font-weight:600;page-break-before:always;margin:1.6em 0 .9em;}
-h1{font-size:1.7em;margin-top:2.4em;}
-h2{font-size:1.35em;}
-h3{font-size:1.12em;font-style:italic;font-weight:400;}
+h1,h2,h3{font-family:Georgia,serif;line-height:1.25;font-weight:600;}
+/* Only the chapter-level heading forces a page; sub-headings just get breathing
+   room above and a tighter gap to the body that follows. */
+h1{font-size:1.7em;text-align:center;margin:2.4em 0 1.1em;page-break-before:always;page-break-after:avoid;}
+h2{font-size:1.32em;margin:1.8em 0 .55em;page-break-after:avoid;}
+h3{font-size:1.1em;font-style:italic;margin:1.4em 0 .4em;page-break-after:avoid;}
 p{margin:0;text-indent:1.25em;}
 p:first-of-type,h1+p,h2+p,h3+p{text-indent:0;}
 /* footnotes: smaller, set off from the body, never first-line indented */
@@ -511,8 +523,35 @@ function buildOpf(meta,chapters,uid,modified){
 </package>`;
 }
 
+/* Build a nested navigation tree from chapters and the headings inside them.
+   Each chapter is a top node (linking to its file); headings deeper than the
+   chapter's own title level nest beneath it by level. */
+function navTree(chapters){
+  const roots=[];
+  chapters.forEach((ch,ci)=>{
+    const href=`text/chap${ci+1}.xhtml`;
+    const firstH=ch.blocks.find(b=>b.kind==="heading");
+    const baseLevel=firstH ? firstH.level : 0;
+    const root={title:ch.title, href, children:[]};
+    roots.push(root);
+    const stack=[{level:baseLevel, node:root}];
+    for(const b of ch.blocks){
+      if(b.kind==="heading" && b.id && b.level>baseLevel){
+        const child={title:b.text, href:`${href}#${b.id}`, children:[]};
+        while(stack.length>1 && stack[stack.length-1].level>=b.level) stack.pop();
+        stack[stack.length-1].node.children.push(child);
+        stack.push({level:b.level, node:child});
+      }
+    }
+  });
+  return roots;
+}
+
 function buildNav(chapters){
-  const items=chapters.map((c,i)=>`<li><a href="text/chap${i+1}.xhtml">${esc(c.title)}</a></li>`).join("\n      ");
+  const render=(nodes,pad)=> nodes.map(n=>{
+    const sub=n.children.length ? `\n${pad}  <ol>\n${render(n.children,pad+"    ")}\n${pad}  </ol>\n${pad}` : "";
+    return `${pad}<li><a href="${n.href}">${esc(n.title)}</a>${sub}</li>`;
+  }).join("\n");
   return `<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="en">
@@ -520,23 +559,28 @@ function buildNav(chapters){
 <body>
   <nav epub:type="toc" id="toc"><h1>Contents</h1>
     <ol>
-      ${items}
+${render(navTree(chapters),"      ")}
     </ol>
   </nav>
 </body></html>`;
 }
 
 function buildNcx(chapters,uid,title){
-  const points=chapters.map((c,i)=>`<navPoint id="n${i+1}" playOrder="${i+1}">
-      <navLabel><text>${esc(c.title)}</text></navLabel>
-      <content src="text/chap${i+1}.xhtml"/>
-    </navPoint>`).join("\n    ");
+  let order=0;
+  const render=(nodes,pad)=> nodes.map(n=>{
+    order++;
+    const kids=n.children.length ? `\n${render(n.children,pad+"  ")}\n${pad}` : "";
+    return `${pad}<navPoint id="np${order}" playOrder="${order}">` +
+           `<navLabel><text>${esc(n.title)}</text></navLabel>` +
+           `<content src="${n.href}"/>${kids}</navPoint>`;
+  }).join("\n");
+  const points=render(navTree(chapters),"    ");
   return `<?xml version="1.0" encoding="utf-8"?>
 <ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
   <head><meta name="dtb:uid" content="urn:uuid:${uid}"/></head>
   <docTitle><text>${esc(title)}</text></docTitle>
   <navMap>
-    ${points}
+${points}
   </navMap>
 </ncx>`;
 }

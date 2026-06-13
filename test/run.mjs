@@ -20,7 +20,7 @@ const pdfjsLib = require("pdfjs-dist/legacy/build/pdf.js");
 
 // folio.js is UMD; from an ES module it imports as a default object.
 import Folio from "../folio.js";
-const { fontStyle, buildLines, detectToc, analyze, toChapters, chapterXhtml } = Folio;
+const { fontStyle, buildLines, detectToc, analyze, toChapters, chapterXhtml, buildNav, buildNcx } = Folio;
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -69,6 +69,26 @@ function convert(pages, opts){
 
 const paras  = blocks => blocks.filter(b => b.kind === "para");
 const blockWith = (blocks, needle) => paras(blocks).find(b => b.text.includes(needle));
+
+/* Stack-based XML well-formedness check (readers reject malformed nav/markup). */
+function xmlError(xml, name){
+  const s = xml.replace(/<\?[\s\S]*?\?>/g,"").replace(/<!DOCTYPE[^>]*>/gi,"").replace(/<!--[\s\S]*?-->/g,"");
+  const stack=[]; const re=/<(\/?)([a-zA-Z0-9:]+)([^>]*?)(\/?)>/g; let m;
+  while((m=re.exec(s))){
+    const [, slash, tag, , self] = m;
+    if(self) continue;
+    if(slash){ const top=stack.pop(); if(top!==tag) return `${name}: </${tag}> but expected </${top||"?"}>`; }
+    else stack.push(tag);
+  }
+  return stack.length ? `${name}: unclosed <${stack[stack.length-1]}>` : null;
+}
+function checkWellFormed(blocks, label){
+  const chapters = toChapters(blocks);
+  const parts = { nav: buildNav(chapters), ncx: buildNcx(chapters, "u", "T"),
+                  ...Object.fromEntries(chapters.map((c,i) => ["chap"+(i+1), chapterXhtml(c)])) };
+  const err = Object.entries(parts).map(([n,x]) => xmlError(x,n)).find(Boolean);
+  check(`${label}: all EPUB parts are well-formed XML`, !err, err || "");
+}
 
 /* ---------- assertion plumbing ---------- */
 let failures = 0;
@@ -142,6 +162,18 @@ console.log("\nfixture: structured.pdf (title, bold/numbered headings, inline em
   check("emphasis paragraph stays whole",
     !!intro && intro.text.includes("broadly important"),
     intro ? `ends: "${intro.text.slice(-22)}"` : "not found");
+
+  // nested nav: "1.1 Background" should sit under "1. Introduction"
+  const chapters = toChapters(blocks);
+  const nav = buildNav(chapters);
+  const introIdx = nav.indexOf("1. Introduction");
+  const subIdx   = nav.indexOf("1.1 Background");
+  check("nav nests subsection under its section",
+    introIdx >= 0 && subIdx > introIdx && nav.slice(introIdx, subIdx).includes("<ol>"),
+    "no nested <ol> between section and subsection");
+  check("headings carry anchor ids in chapter markup",
+    chapters.map(chapterXhtml).join("").match(/<h3 id="h\d+"/));
+  checkWellFormed(blocks, "structured");
 }
 
 console.log("\nfixture: notes.pdf (footnote at page foot + hanging-indent references)");
@@ -168,6 +200,7 @@ console.log("\nfixture: notes.pdf (footnote at page foot + hanging-indent refere
   const xh = toChapters(blocks).map(chapterXhtml).join("\n");
   check("footnote renders with class", /<p class="footnote">/.test(xh));
   check("bibliography renders with hanging-indent class", /<p class="biblio">/.test(xh));
+  checkWellFormed(blocks, "notes");
 }
 
 console.log(failures ? `\nFAILED (${failures})` : "\nPASSED");
