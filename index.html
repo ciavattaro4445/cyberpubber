@@ -307,6 +307,22 @@
       </label>
     </div>
 
+    <div class="opts">
+      <label class="opt">
+        <input type="radio" name="cover" id="coverNone" value="none" checked />
+        <span>No cover</span>
+      </label>
+      <label class="opt">
+        <input type="radio" name="cover" value="page1" />
+        <span>Cover from first PDF page<small>Renders page 1 as the cover image.</small></span>
+      </label>
+      <label class="opt">
+        <input type="radio" name="cover" value="upload" />
+        <span>Upload a cover image…<small id="coverName">JPG, PNG or WebP.</small></span>
+      </label>
+      <input type="file" id="coverFile" accept="image/*" hidden />
+    </div>
+
     <button class="go" id="go" disabled>Compile EPUB</button>
 
     <div class="stage" id="stage">
@@ -340,7 +356,7 @@
    only the browser glue: PDF.js extraction, JSZip packaging, the share-sheet
    output, and the UI. */
 const { fontStyle, buildLines, detectToc, analyze, toChapters,
-        chapterXhtml, STYLE_CSS, buildOpf, buildNav, buildNcx } = Folio;
+        chapterXhtml, coverXhtml, STYLE_CSS, buildOpf, buildNav, buildNcx } = Folio;
 
 /* ----- PDF.js worker (same CDN/version as the library above) ----- */
 pdfjsLib.GlobalWorkerOptions.workerSrc =
@@ -394,6 +410,20 @@ drop.addEventListener("click",()=>fileInput.click());
 drop.addEventListener("drop",ev=>{const f=ev.dataTransfer.files[0]; if(f) setFile(f);});
 fileInput.addEventListener("change",()=>{ if(fileInput.files[0]) setFile(fileInput.files[0]); });
 
+/* ---------- cover image selection ---------- */
+const coverFileInput=$("coverFile");
+document.querySelectorAll('input[name="cover"]').forEach(r=>r.addEventListener("change",()=>{
+  if(r.value==="upload" && r.checked && !coverImageFile) coverFileInput.click();
+}));
+coverFileInput.addEventListener("change",()=>{
+  const f=coverFileInput.files[0];
+  if(f){
+    coverImageFile=f;
+    $("coverName").textContent=f.name+" · "+(f.size/1024).toFixed(0)+" KB";
+    document.querySelector('input[name="cover"][value="upload"]').checked=true;
+  }
+});
+
 function setFile(f){
   if(f.type!=="application/pdf" && !/\.pdf$/i.test(f.name)){
     alert("Please choose a PDF file."); return;
@@ -437,7 +467,44 @@ async function readPdf(file,onProg){
     onProg(p/N*0.5, `Reading page ${p} of ${N}…`);
     if(p%5===0) await sleep(0); // let UI breathe
   }
-  return {pages,N,totalChars};
+  return {pages,N,totalChars,pdf};
+}
+
+/* ---------- cover ---------- */
+let coverImageFile=null;   // set when the user uploads an image
+
+/* Render page 1 of the PDF to a JPEG blob for use as a cover. Resolution is
+   capped so the cover stays a sensible size and mobile memory stays bounded. */
+async function renderFirstPageCover(pdf){
+  const page=await pdf.getPage(1);
+  const base=page.getViewport({scale:1});
+  const scale=Math.max(1, Math.min(2, 1600/Math.max(base.width,base.height)));
+  const viewport=page.getViewport({scale});
+  const canvas=document.createElement("canvas");
+  canvas.width=Math.ceil(viewport.width); canvas.height=Math.ceil(viewport.height);
+  const ctx=canvas.getContext("2d");
+  ctx.fillStyle="#fff"; ctx.fillRect(0,0,canvas.width,canvas.height); // PDFs are transparent
+  await page.render({canvasContext:ctx,viewport}).promise;
+  page.cleanup();
+  const blob=await new Promise(res=>canvas.toBlob(res,"image/jpeg",0.85));
+  canvas.width=canvas.height=0;   // release the bitmap promptly
+  return blob;
+}
+
+/* Resolve the chosen cover into { blob, href, mediaType } or null. */
+async function getCover(pdf){
+  const mode=(document.querySelector('input[name="cover"]:checked')||{}).value||"none";
+  if(mode==="none") return null;
+  if(mode==="upload"){
+    if(!coverImageFile){ log("No cover image was selected — skipping cover.",true); return null; }
+    const mt=coverImageFile.type||"image/jpeg";
+    const ext=mt.includes("png")?"png":mt.includes("webp")?"webp":mt.includes("gif")?"gif":"jpg";
+    return {blob:coverImageFile, href:`images/cover.${ext}`, mediaType:mt, source:"uploaded image"};
+  }
+  try{
+    const blob=await renderFirstPageCover(pdf);
+    return {blob, href:"images/cover.jpg", mediaType:"image/jpeg", source:"PDF page 1"};
+  }catch(e){ log("Could not render the first page as a cover — skipping.",true); return null; }
 }
 
 /* Resolve each glyph's font style (bold/italic) so headings and inline emphasis
@@ -464,7 +531,7 @@ function uuid(){
     const r=Math.random()*16|0;return (c==="x"?r:(r&0x3|0x8)).toString(16);});
 }
 
-async function buildEpub(meta,chapters,onProg){
+async function buildEpub(meta,chapters,onProg,cover){
   const zip=new JSZip();
   const uid=uuid();
   // mimetype MUST be first and stored uncompressed
@@ -475,10 +542,14 @@ async function buildEpub(meta,chapters,onProg){
   <rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
 </container>`);
   zip.file("OEBPS/styles/style.css",STYLE_CSS);
+  if(cover && cover.blob){
+    zip.file("OEBPS/"+cover.href, cover.blob);
+    zip.file("OEBPS/text/cover.xhtml", coverXhtml(cover));
+  }
   chapters.forEach((c,i)=>zip.file(`OEBPS/text/chap${i+1}.xhtml`,chapterXhtml(c)));
   const modified=new Date().toISOString().replace(/\.\d+Z$/,"Z");
-  zip.file("OEBPS/content.opf",buildOpf(meta,chapters,uid,modified));
-  zip.file("OEBPS/nav.xhtml",buildNav(chapters));
+  zip.file("OEBPS/content.opf",buildOpf(meta,chapters,uid,modified,cover||null));
+  zip.file("OEBPS/nav.xhtml",buildNav(chapters,cover||null));
   zip.file("OEBPS/toc.ncx",buildNcx(chapters,uid,meta.title));
   return zip.generateAsync(
     {type:"blob",mimeType:"application/epub+zip",compression:"DEFLATE"},
@@ -506,7 +577,7 @@ go.addEventListener("click",async()=>{
 
   try{
     log("Loading parser…");
-    const {pages,N,totalChars}=await readPdf(chosenFile,(p,m)=>setProg(p,m));
+    const {pages,N,totalChars,pdf}=await readPdf(chosenFile,(p,m)=>setProg(p,m));
     log(`Read ${N} page(s), ${totalChars.toLocaleString()} characters.`);
     if(totalChars < N*20){
       log("Very little text found — this looks like a scanned/image PDF. EPUB will be mostly empty without OCR.",true);
@@ -528,8 +599,13 @@ go.addEventListener("click",async()=>{
     const chapters=toChapters(blocks);
     log(`Organised into ${chapters.length} section(s).`);
 
+    setProg(0.82,"Preparing cover…");
+    const cover=await getCover(pdf);
+    if(cover) log(`Cover added (${cover.source}).`);
+    try{ pdf.destroy(); }catch(e){}
+
     setProg(0.85,"Packaging EPUB…");
-    const blob=await buildEpub(meta,chapters,(p,m)=>setProg(p,m));
+    const blob=await buildEpub(meta,chapters,(p,m)=>setProg(p,m),cover);
 
     if(lastUrl) URL.revokeObjectURL(lastUrl);
     lastBlob=blob;
@@ -563,6 +639,8 @@ $("reset").addEventListener("click",()=>{
   $("dropSmall").textContent="// or click to select";
   go.disabled=true; stage.classList.remove("on"); doneEl.classList.remove("on");
   $("title").value=""; $("author").value="";
+  coverImageFile=null; coverFileInput.value=""; $("coverNone").checked=true;
+  $("coverName").textContent="JPG, PNG or WebP.";
 });
 </script>
 </body>

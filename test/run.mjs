@@ -20,7 +20,7 @@ const pdfjsLib = require("pdfjs-dist/legacy/build/pdf.js");
 
 // folio.js is UMD; from an ES module it imports as a default object.
 import Folio from "../folio.js";
-const { fontStyle, buildLines, detectToc, analyze, toChapters, chapterXhtml, buildNav, buildNcx } = Folio;
+const { fontStyle, buildLines, detectToc, analyze, toChapters, chapterXhtml, coverXhtml, buildNav, buildNcx, buildOpf } = Folio;
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -201,6 +201,30 @@ console.log("\nfixture: notes.pdf (footnote at page foot + hanging-indent refere
   check("footnote renders with class", /<p class="footnote">/.test(xh));
   check("bibliography renders with hanging-indent class", /<p class="biblio">/.test(xh));
   checkWellFormed(blocks, "notes");
+}
+
+console.log("\nunit: cover wiring (OPF / cover page / landmarks)");
+{
+  const cover = { href:"images/cover.jpg", mediaType:"image/jpeg" };
+  const chapters = [{ title:"One", blocks:[
+    {kind:"heading", level:1, text:"One", id:"h1"},
+    {kind:"para", text:"hi", runs:[{text:"hi",style:"regular"}]} ]}];
+  const opf  = buildOpf({title:"T",author:"A"}, chapters, "uid", "2026-01-01T00:00:00Z", cover);
+  const cx   = coverXhtml(cover);
+  const nav  = buildNav(chapters, cover);
+
+  check("OPF declares the cover image", /properties="cover-image"/.test(opf) && /href="images\/cover\.jpg"/.test(opf));
+  check("OPF cover is the first spine item",
+    /<spine[^>]*>\s*<itemref idref="cover"\/>/.test(opf));
+  check("OPF carries legacy cover meta", /<meta name="cover" content="cover-image"\/>/.test(opf));
+  check("cover page references the image", /src="\.\.\/images\/cover\.jpg"/.test(cx));
+  check("nav landmarks point at the cover", /epub:type="cover"/.test(nav));
+  const err = [["opf",opf],["cover",cx],["nav",nav]].map(([n,x])=>xmlError(x,n)).find(Boolean);
+  check("cover parts are well-formed XML", !err, err || "");
+
+  // and with no cover, none of that leaks in
+  const plainOpf = buildOpf({title:"T",author:"A"}, chapters, "uid", "2026-01-01T00:00:00Z", null);
+  check("no cover → no cover markup", !/cover/.test(plainOpf));
 }
 
 console.log(failures ? `\nFAILED (${failures})` : "\nPASSED");

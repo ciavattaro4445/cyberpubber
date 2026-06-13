@@ -494,17 +494,39 @@ p.footnote:first-of-type,p:not(.footnote)+p.footnote{margin-top:.8em;border-top:
 p.biblio{text-indent:-1.4em;margin:0 0 .4em 1.4em;text-align:left;}
 `;
 
-function buildOpf(meta,chapters,uid,modified){
+/* Full-bleed cover page. `cover` = { href, mediaType } where href is the image
+   path relative to OEBPS (e.g. "images/cover.jpg"). */
+function coverXhtml(cover){
+  return `<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="en" lang="en">
+<head><meta charset="utf-8"/><title>Cover</title>
+<style>html,body{margin:0;padding:0;height:100%;}
+.cover{margin:0;padding:0;text-align:center;page-break-after:always;}
+.cover img{max-width:100%;max-height:100vh;}</style></head>
+<body epub:type="cover">
+<section class="cover"><img src="../${cover.href}" alt="Cover"/></section>
+</body></html>`;
+}
+
+function buildOpf(meta,chapters,uid,modified,cover){
   const manifest=[
     `<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>`,
     `<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>`,
     `<item id="css" href="styles/style.css" media-type="text/css"/>`
   ];
   const spine=[];
+  if(cover){
+    manifest.push(`<item id="cover-image" href="${cover.href}" media-type="${cover.mediaType}" properties="cover-image"/>`);
+    manifest.push(`<item id="cover" href="text/cover.xhtml" media-type="application/xhtml+xml"/>`);
+    spine.push(`<itemref idref="cover"/>`);
+  }
   chapters.forEach((c,i)=>{
     manifest.push(`<item id="c${i+1}" href="text/chap${i+1}.xhtml" media-type="application/xhtml+xml"/>`);
     spine.push(`<itemref idref="c${i+1}"/>`);
   });
+  // EPUB 2 reading systems (incl. older iOS Books) look for this legacy cover meta.
+  const coverMeta = cover ? `\n    <meta name="cover" content="cover-image"/>` : "";
   return `<?xml version="1.0" encoding="utf-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
@@ -512,7 +534,7 @@ function buildOpf(meta,chapters,uid,modified){
     <dc:title>${esc(meta.title)}</dc:title>
     <dc:creator>${esc(meta.author)}</dc:creator>
     <dc:language>en</dc:language>
-    <meta property="dcterms:modified">${modified}</meta>
+    <meta property="dcterms:modified">${modified}</meta>${coverMeta}
   </metadata>
   <manifest>
     ${manifest.join("\n    ")}
@@ -547,11 +569,18 @@ function navTree(chapters){
   return roots;
 }
 
-function buildNav(chapters){
+function buildNav(chapters,cover){
   const render=(nodes,pad)=> nodes.map(n=>{
     const sub=n.children.length ? `\n${pad}  <ol>\n${render(n.children,pad+"    ")}\n${pad}  </ol>\n${pad}` : "";
     return `${pad}<li><a href="${n.href}">${esc(n.title)}</a>${sub}</li>`;
   }).join("\n");
+  /* Landmarks tell the reader where the book proper begins (and where the cover
+     is), so it opens to content rather than a blank/preview page. */
+  const landmarks=`<nav epub:type="landmarks" id="landmarks" hidden="hidden"><h2>Guide</h2>
+    <ol>
+${cover?`      <li><a epub:type="cover" href="text/cover.xhtml">Cover</a></li>\n`:""}      <li><a epub:type="bodymatter" href="text/chap1.xhtml">Begin Reading</a></li>
+    </ol>
+  </nav>`;
   return `<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="en">
@@ -562,6 +591,7 @@ function buildNav(chapters){
 ${render(navTree(chapters),"      ")}
     </ol>
   </nav>
+  ${landmarks}
 </body></html>`;
 }
 
@@ -586,5 +616,5 @@ ${points}
 }
 
 return { fontStyle, buildLines, detectToc, analyze, toChapters,
-         esc, chapterXhtml, STYLE_CSS, buildOpf, buildNav, buildNcx };
+         esc, chapterXhtml, coverXhtml, STYLE_CSS, buildOpf, buildNav, buildNcx };
 });
