@@ -533,6 +533,21 @@ function reconstruct(pages,opts,onProg,toc){
   const bodyLeft=mode(allLines.map(l=>l.x));
   const bodyRight=Math.max(...allLines.map(l=>l.right));
 
+  /* Typical line spacing (baseline-to-baseline), measured from the document
+     itself. pdf.js reports glyph height inconsistently (often the cap/ascent
+     height, ~0.7–0.8× the em), so a paragraph-gap threshold keyed to bodyH
+     misfires and treats every line break as a new paragraph. The median of
+     consecutive same-page line gaps is the real leading; paragraph breaks are
+     the minority, so the median lands on the in-paragraph spacing. */
+  const gaps=[];
+  pages.forEach(lns=>{
+    for(let i=1;i<lns.length;i++){
+      const g=lns[i-1].y - lns[i].y;
+      if(g>0.5) gaps.push(g);
+    }
+  });
+  const bodyGap = gaps.length ? median(gaps) : bodyH*1.2;
+
   /* TOC-driven chapters: map each contents title to its real position in
      the body (an exact full-line match), rather than trusting page numbers
      — the printed→PDF offset is often inconsistent. First match wins. */
@@ -619,7 +634,7 @@ function reconstruct(pages,opts,onProg,toc){
       const indented = l.x > bodyLeft + bodyH*0.8;
       const sameApage = l.page===lastBodyLine.page;
       const vGap = sameApage ? (lastBodyLine.y - l.y) : 0;
-      const bigGap = sameApage && vGap > bodyH*1.7;
+      const bigGap = sameApage && vGap > bodyGap*1.5;
       const prevShortEnd = lastBodyLine.right < bodyRight - bodyH*3 && /[.!?»"”’)]$/.test(buf.trim());
       if(indented || bigGap || prevShortEnd) newPara=true;
     }
