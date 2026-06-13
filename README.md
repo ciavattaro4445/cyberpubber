@@ -16,9 +16,17 @@ Open `index.html` in any browser, drop in a PDF, and download an EPUB.
 - **Parses** the PDF with [PDF.js](https://mozilla.github.io/pdf.js/) (the engine inside Firefox).
 - **Reconstructs paragraphs** from positioned glyphs — rejoining the hard line breaks
   that PDFs put at the end of every visual line, so the EPUB actually reflows.
+- **Recovers structure** by reading each glyph's font: the title and section/subsection
+  headings (by size, weight, and "2.1"-style numbering), and **inline *italic* / bold**,
+  which carry through as `<em>`/`<strong>`.
+- **Separates footnotes** (small type at the page foot) and splits a **References /
+  Bibliography** section into individual hanging-indent entries, instead of letting
+  either bleed into the body text.
+- **Builds a nested table of contents** (sections with their subsections) linked to
+  anchors in the text.
 - **Detects chapters** by finding the book's printed Contents page (by shape, wherever
-  it sits) and matching each title to where it appears in the body. Falls back to a
-  font-size heuristic when there's no usable Contents page.
+  it sits) and matching each title to where it appears in the body. Falls back to the
+  font/heading heuristics above when there's no usable Contents page.
 - **Strips** repeating running heads and bare page numbers, and **mends** words
   hyphenated across line endings.
 - **Packages** a valid EPUB 3 (with an EPUB 2 `toc.ncx` for older readers) using
@@ -36,7 +44,9 @@ The PDF itself stays on your device.
 
 ## Limitations
 
-- Best for **text-heavy prose**. Multi-column layouts, tables, and footnotes may come out imperfect.
+- Best for **text-heavy prose** and single-column papers. Multi-column layouts, tables,
+  and figures may come out imperfect. Footnotes are separated but not yet linked back to
+  their in-text markers (they read as set-off notes, not pop-ups).
 - **Scanned / image-only PDFs have no text to extract** and need OCR first (out of scope).
 - Chapter detection relies on a Contents page with page numbers, or on heading typography;
   books with neither fall back to a single section.
