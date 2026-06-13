@@ -631,7 +631,14 @@ function reconstruct(pages,opts,onProg,toc){
     if(!buf){
       newPara=true;
     } else if(lastBodyLine){
-      const indented = l.x > bodyLeft + bodyH*0.8;
+      /* A paragraph's first line is indented — but the indent is a step to the
+         RIGHT of the line before it, measured locally, not against the global
+         body margin. Keying only off bodyLeft shattered any block set at its
+         own inset margin (abstracts, block quotes): every line there sits past
+         bodyLeft and looked like a fresh paragraph. Requiring a rightward step
+         from the previous line means inset blocks flow, and a de-dent back to a
+         block's continuation margin is never mistaken for a new paragraph. */
+      const indented = l.x > bodyLeft + bodyH*0.8 && l.x - lastBodyLine.x > bodyH*0.5;
       const sameApage = l.page===lastBodyLine.page;
       const vGap = sameApage ? (lastBodyLine.y - l.y) : 0;
       const bigGap = sameApage && vGap > bodyGap*1.5;
