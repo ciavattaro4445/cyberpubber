@@ -1,0 +1,12 @@
+{
+  "name": "cyberpubber",
+  "version": "1.0.0",
+  "private": true,
+  "description": "PDF to EPUB converter that runs entirely in the browser",
+  "scripts": {
+    "test": "node test/run.mjs"
+  },
+  "devDependencies": {
+    "pdfjs-dist": "3.11.174"
+  }
+}

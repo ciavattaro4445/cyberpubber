@@ -1,1 +1,4 @@
 .claude/
+node_modules/
+# local test PDFs live at the repo root; keep only committed fixtures in test/fixtures/
+/*.pdf

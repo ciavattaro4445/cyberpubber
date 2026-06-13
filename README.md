@@ -1,7 +1,11 @@
 # CyberPubber — PDF → EPUB
 
-A single-file, browser-based converter that turns text PDFs into clean, reflowable EPUBs.
+A browser-based converter that turns text PDFs into clean, reflowable EPUBs.
 Everything runs locally in your browser — **your file is never uploaded anywhere**.
+
+The app is `index.html` plus `folio.js` (the conversion core). No build step — open it
+or host it as-is. `folio.js` is also loadable in Node, which is how the test suite
+exercises the conversion against real PDFs.
 
 Live at **https://ciavattaro4445.github.io/cyberpubber/**.
 
@@ -38,9 +42,22 @@ The PDF itself stays on your device.
   books with neither fall back to a single section.
 - Large books run slower on mobile (the PDF.js worker can't always load there).
 
+## Tests
+
+The conversion core (`folio.js`) is verified headlessly against real PDFs:
+
+```
+npm install
+npm test                       # runs the asserted fixture suite
+node test/run.mjs some.pdf     # dumps the reconstruction of any PDF (debug)
+```
+
+The browser feeds `folio.js` the same PDF.js text items the harness does, so a green
+run reflects the app's behavior.
+
 ## Hosting (optional)
 
-Because it's a static file, you can serve it free via **GitHub Pages**:
+Because it's static files, you can serve them free via **GitHub Pages**:
 enable Pages on the repo (Settings → Pages → deploy from the `main` branch, root),
 and the app will be live at `https://<user>.github.io/<repo>/`.
 
